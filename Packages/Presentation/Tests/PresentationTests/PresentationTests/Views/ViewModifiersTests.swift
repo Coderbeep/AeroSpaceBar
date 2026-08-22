@@ -244,6 +244,11 @@ final class ViewModifiersTests: XCTestCase {
         expect(activeWorkspaceWindowOpacity).to(beGreaterThan(inactiveWorkspaceWindowOpacity))
     }
 
+    func testInactiveWorkspaceContainerIsSubdued() {
+        expect(SpaceFocusState.opacity(isFocused: true)) == 1.0
+        expect(SpaceFocusState.opacity(isFocused: false)) == 0.65
+    }
+
     // MARK: - Visual Container Modifier Tests
 
     func testVisualContainerConfigurationModifier() {

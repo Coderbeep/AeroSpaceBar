@@ -47,6 +47,9 @@ struct HoverState: ViewModifier {
 
 /// Focus state modifier for spaces
 struct SpaceFocusState: ViewModifier {
+    /// Opacity for an inactive workspace container.
+    private static let inactiveWorkspaceOpacity = 0.65
+
     let isFocused: Bool
     let colorProperties: ColorProperties
     let geometricProperties: GeometricProperties
@@ -72,7 +75,15 @@ struct SpaceFocusState: ViewModifier {
                         .allowsHitTesting(false)
                 }
             }
+            .opacity(Self.opacity(isFocused: isFocused))
             .padding(.horizontal, ConfigurationDefaults.widgetSpacing + (geometricProperties.borderWidth * 2))
+    }
+
+    /// Resolves the opacity for the complete workspace container.
+    /// - Parameter isFocused: Whether this is the active workspace.
+    /// - Returns: Full opacity for the active workspace and reduced opacity otherwise.
+    static func opacity(isFocused: Bool) -> Double {
+        isFocused ? 1 : inactiveWorkspaceOpacity
     }
 
     /// Creates the background view based on theme mode and availability.
