@@ -1,4 +1,5 @@
 <!-- Copyright (c) 2026 AeroSpaceBar by Ronen Druker. -->
+<!-- Modifications Copyright (c) 2026 Jakub Kubiak. -->
 
 <!-- markdownlint-disable-next-line MD041 -->
 <div align="center">
@@ -6,6 +7,10 @@
 </div>
 
 <h1 align="center">🚀 AeroSpaceBar</h1>
+
+> **Modified fork:** AeroSpaceBar was originally created by [Ronen Druker](https://github.com/rdrkr). This fork is
+> maintained by [Jakub Kubiak](https://github.com/Coderbeep) and contains modifications made since 2026-08-22. It
+> remains distributed under the [GNU Affero General Public License v3.0](LICENSE).
 
 <div align="center">
 
@@ -32,7 +37,8 @@ the menu bar.
 ### ✨ Key Features
 
 - 🎨 **Beautiful UI**: Modern SwiftUI interface with smooth animations and hover effects
-- ⚡ **Lightning Fast**: Optimized performance with efficient data refresh and icon caching
+- ⚡ **Real-time Updates**: Focus changes render immediately, with an asynchronous focused-title refresh and no
+  per-switch AppleScript processes
 - 🔒 **Privacy Focused**: Runs entirely locally, no data sent to external servers
 - 🔧 **Spaces & Groups**: Organize and manage workspace windows and menubar groups with custom ranges and settings
 - 🎨 **Advanced Theming**: Comprehensive theme system with presets and per-space customization
@@ -46,7 +52,10 @@ the menu bar.
 ### Prerequisites
 
 - **macOS 15.0+** (Sequoia or later)
-- **[AeroSpace window manager](https://github.com/nikitabobko/aerospace)** installed and running
+- **[AeroSpace window manager](https://github.com/nikitabobko/aerospace) 0.21.0+** installed and running
+
+  AeroSpaceBar uses the public `aerospace subscribe` event stream introduced in AeroSpace 0.21. Older versions fall
+  back to periodic reconciliation and do not receive immediate focus updates.
 
 > [!NOTE]
 > By using AeroSpaceBar, you acknowledge that it's
@@ -173,6 +182,9 @@ rm ~/Library/Preferences/com.rdrkr.AeroSpaceBar.plist
 - **Xcode 16.3+** with **Swift 6.2+**
 - **SwiftFormat** and **SwiftLint**: `brew install swiftformat swiftlint`
 - **pre-commit** (optional): `brew install pre-commit && pre-commit install`
+
+Debug builds skip the pre-build formatter/linter phase so the app can be run iteratively from Xcode. Release builds run the
+checks by default; pass `SKIP_CODE_QUALITY_CHECKS=YES` only for compile-only verification after checking the code separately.
 
 ### Architecture
 
@@ -387,7 +399,9 @@ We welcome contributions! Here's how:
 
 <div align="center">
 
-**Made with ❤️ by [Ronen Druker](https://github.com/rdrkr)**
+**Originally created with ❤️ by [Ronen Druker](https://github.com/rdrkr)**
+
+**Fork maintained by [Jakub Kubiak](https://github.com/Coderbeep)**
 
 [⭐ Star this repo](https://github.com/rdrkr/AeroSpaceBar/stargazers) | [🐛 Report a bug](https://github.com/rdrkr/AeroSpaceBar/issues) | [💡 Request a feature](https://github.com/rdrkr/AeroSpaceBar/issues/new) | [💬 Discussions](https://github.com/rdrkr/AeroSpaceBar/discussions)
 

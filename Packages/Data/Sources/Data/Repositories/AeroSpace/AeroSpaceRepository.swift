@@ -1,7 +1,8 @@
 // Copyright (c) 2025 AeroSpaceBar by Ronen Druker.
+// Modifications Copyright (c) 2026 Jakub Kubiak.
+// Modified 2026-08-22 by Jakub Kubiak: Added real-time AeroSpace focus events.
 
 import AppKit
-import ApplicationServices
 import Combine
 import Domain
 import Foundation
@@ -14,7 +15,10 @@ import Foundation
 /// This is the data layer implementation of the SpacesGateway.
 @MainActor
 public final class AeroSpaceRepository: SpacesGateway {
-    /// The callback to update AeroSpaceBar on focus change.
+    /// The legacy callback used by previous AeroSpaceBar releases.
+    ///
+    /// Retained only so the real-time event implementation can remove its exact
+    /// entry without touching the user's other `on-focus-changed` callbacks.
     /// `nonisolated` so the off-main reconfiguration path can read it without hopping actors.
     nonisolated private static let onFocusChangedCallback = """
     exec-and-forget osascript -e \"
@@ -24,7 +28,7 @@ public final class AeroSpaceRepository: SpacesGateway {
     \"
     """.replacingOccurrences(of: "\n", with: " ")
 
-    /// The `exec-on-workspace-change` process spec that notifies AeroSpaceBar of workspace transitions.
+    /// The legacy `exec-on-workspace-change` process spec used by previous releases.
     ///
     /// Needed in addition to `on-focus-changed` because switching to an empty workspace
     /// may not always fire `on-focus-changed` (no window to focus). Directly exec's osascript
@@ -54,6 +58,9 @@ public final class AeroSpaceRepository: SpacesGateway {
     /// Factory for creating AeroSpace CLI clients.
     private let cliFactory: AeroSpaceCLIClientFactoryProtocol
 
+    /// Client for AeroSpace's persistent real-time event stream.
+    private let eventClient: AeroSpaceEventClientProtocol
+
     /// Executor for generic commands.
     private let commandExecutor: CommandExecutorProtocol
 
@@ -69,8 +76,11 @@ public final class AeroSpaceRepository: SpacesGateway {
     /// Cached spaces color properties.
     private var spacesColorProperties: [ColorProperties]
 
-    /// Task for window focus monitoring.
-    private var windowFocusMonitoringTask: Task<Void, Never>?
+    /// Task that maintains the persistent AeroSpace event subscription.
+    private var eventMonitoringTask: Task<Void, Never>?
+
+    /// Periodic safety-net refresh for event types AeroSpace does not emit yet.
+    private var reconciliationTask: Task<Void, Never>?
 
     /// NSWorkspace observer tokens for app lifecycle notifications.
     ///
@@ -80,6 +90,9 @@ public final class AeroSpaceRepository: SpacesGateway {
 
     /// Debounced-refresh task; coalesces bursts of lifecycle notifications.
     private var pendingRefreshTask: Task<Void, Never>?
+
+    /// Refreshes metadata for the newest focused window without delaying focus UI updates.
+    private var focusedWindowRefreshTask: Task<Void, Never>?
 
     /// Cancellables for publisher subscriptions.
     private var cancellables: Set<AnyCancellable> = []
@@ -113,6 +126,7 @@ public final class AeroSpaceRepository: SpacesGateway {
         getOptimizedPerformanceEnabledUseCase: GetOptimizedPerformanceEnabledUseCase,
         getSpacesColorPropertiesUseCase: GetSpacesColorPropertiesUseCase,
         cliFactory: AeroSpaceCLIClientFactoryProtocol = AeroSpaceCLIClientFactory(),
+        eventClient: AeroSpaceEventClientProtocol = AeroSpaceEventClient(),
         commandExecutor: CommandExecutorProtocol = CommandExecutor(),
         runningAppChecker: RunningAppCheckerProtocol = RunningAppChecker()
     ) {
@@ -122,6 +136,7 @@ public final class AeroSpaceRepository: SpacesGateway {
         self.getOptimizedPerformanceEnabledUseCase = getOptimizedPerformanceEnabledUseCase
         self.getSpacesColorPropertiesUseCase = getSpacesColorPropertiesUseCase
         self.cliFactory = cliFactory
+        self.eventClient = eventClient
         self.commandExecutor = commandExecutor
         self.runningAppChecker = runningAppChecker
 
@@ -133,52 +148,17 @@ public final class AeroSpaceRepository: SpacesGateway {
         configureWindowFocusMonitoring()
     }
 
-    /// Configures the AeroSpace configuration.
-    private func configureAeroSpaceConfig() async {
-        let success = if optimizedPerformanceEnabled {
-            try? await AeroSpaceConfiguration.appendOnFocusChanged(
-                at: getAeroSpaceConfigPathUseCase.execute(),
-                command: Self.onFocusChangedCallback
-            )
-        } else {
-            try? await AeroSpaceConfiguration.removeOnFocusChanged(
-                at: getAeroSpaceConfigPathUseCase.execute(),
-                command: Self.onFocusChangedCallback
-            )
-        }
-
-        if success == true {
-            await reloadAeroSpaceConfig()
-            Logger.info("Successfully configured AeroSpace configuration", category: Logger.config)
-        } else {
-            Logger.warning("Failed to configure AeroSpace configuration", category: Logger.config)
-        }
-    }
-
-    /// Reloads the AeroSpace configuration.
-    private func reloadAeroSpaceConfig() async {
-        let executablePath = aeroSpaceExecutable
-        guard !executablePath.isEmpty else {
-            Logger.warning("Cannot reload AeroSpace config: executable path not set", category: Logger.config)
-            return
-        }
-
-        do {
-            let cli = cliFactory.makeClient(executablePath: executablePath)
-            _ = try await cli.execute(arguments: ["reload-config"])
-            Logger.info("Successfully reloaded AeroSpace configuration", category: Logger.config)
-        } catch {
-            Logger.error("Failed to reload AeroSpace configuration", error: error, category: Logger.config)
-        }
-    }
-
-    /// Sets up Apple Event handling for focus change notifications.
+    /// Sets up real-time AeroSpace event monitoring and reconciliation.
     private func configureWindowFocusMonitoring() {
         Logger.info("Configuring window focus monitoring", category: Logger.spaces)
 
         // Cancel any existing task
-        windowFocusMonitoringTask?.cancel()
-        windowFocusMonitoringTask = nil
+        eventMonitoringTask?.cancel()
+        eventMonitoringTask = nil
+        reconciliationTask?.cancel()
+        reconciliationTask = nil
+        focusedWindowRefreshTask?.cancel()
+        focusedWindowRefreshTask = nil
 
         // Remove any existing event handlers
         NSAppleEventManager.shared().removeEventHandler(
@@ -191,20 +171,14 @@ public final class AeroSpaceRepository: SpacesGateway {
 
         Logger.info("Event handlers removed", category: Logger.spaces)
 
-        // Set up event handlers for optimized performance
+        // Set up the persistent event stream for optimized performance.
         if optimizedPerformanceEnabled {
-            NSAppleEventManager.shared().setEventHandler(
-                self,
-                andSelector: #selector(handleAppleEvent(_:withReplyEvent:)),
-                forEventClass: AEEventClass(0x6173_6372), // 'ascr'
-                andEventID: AEEventID(0x7073_6272) // 'psbr'
-            )
+            startAeroSpaceEventMonitoring()
 
-            // Safety-net poll: AeroSpace callbacks and NSWorkspace notifications
-            // do not cover every edge case (e.g. Cmd+W closing an app's last window
-            // without shifting focus to another app). A 2s refresh ensures the UI
-            // eventually reflects reality even when every other signal misses.
-            windowFocusMonitoringTask = Task.detached(priority: .utility) { [weak self] in
+            // AeroSpace 0.21 does not emit close, move, or title-change events yet.
+            // Keep a low-frequency reconciliation pass for those cases; focus changes
+            // are applied immediately from the event stream above.
+            reconciliationTask = Task.detached(priority: .utility) { [weak self] in
                 guard let self else { return }
 
                 repeat {
@@ -218,7 +192,7 @@ public final class AeroSpaceRepository: SpacesGateway {
                             }
                         }
                     }
-                    try? await Task.sleep(for: .seconds(2))
+                    try? await Task.sleep(for: .seconds(5))
                 } while !Task.isCancelled
             }
 
@@ -226,9 +200,9 @@ public final class AeroSpaceRepository: SpacesGateway {
             // that neither on-focus-changed nor exec-on-workspace-change report.
             installAppLifecycleObservers()
 
-            Logger.info("Event handlers set up", category: Logger.spaces)
+            Logger.info("Real-time AeroSpace event monitoring set up", category: Logger.spaces)
         } else {
-            windowFocusMonitoringTask = Task.detached(priority: .utility) { [weak self] in
+            reconciliationTask = Task.detached(priority: .utility) { [weak self] in
                 guard let self else { return }
 
                 repeat {
@@ -242,16 +216,13 @@ public final class AeroSpaceRepository: SpacesGateway {
 
         // Fire-and-forget: don't await these operations
         let executable = aeroSpaceExecutable
-        let optimized = optimizedPerformanceEnabled
-
         Task.detached(priority: .utility) { [weak self] in
             guard let self else { return }
 
             let configPath = await getAeroSpaceConfigPathUseCase.execute()
             await reconfigureAeroSpaceOffMain(
                 configPath: configPath,
-                executablePath: executable,
-                optimized: optimized
+                executablePath: executable
             )
             await updateSpacesData()
         }
@@ -259,20 +230,113 @@ public final class AeroSpaceRepository: SpacesGateway {
         Logger.info("AeroSpace configuration reconfiguration started", category: Logger.spaces)
     }
 
-    /// Handles Apple Events from osascript calls.
-    @objc
-    private func handleAppleEvent(_ event: NSAppleEventDescriptor, withReplyEvent _: NSAppleEventDescriptor) {
-        // Extract the command from the Apple Event
-        if let command = event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue {
-            switch command {
-            case "updateOnFocusChanged":
-                Task.detached(priority: .utility) { [self] in
-                    await updateSpacesData()
+    /// Maintains a single long-running `aerospace subscribe` process.
+    ///
+    /// Reconnects after AeroSpace starts, restarts, or temporarily becomes unavailable.
+    private func startAeroSpaceEventMonitoring() {
+        let executablePath = aeroSpaceExecutable
+        let eventClient = eventClient
+
+        guard !executablePath.isEmpty else { return }
+
+        eventMonitoringTask = Task.detached(priority: .userInitiated) { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    for try await event in eventClient.events(executablePath: executablePath) {
+                        guard !Task.isCancelled else { return }
+
+                        await self?.handleAeroSpaceEvent(event)
+                    }
+                } catch {
+                    Logger.warning(
+                        "AeroSpace event subscription disconnected; retrying",
+                        category: Logger.spaces,
+                        metadata: ["error": error.localizedDescription]
+                    )
                 }
 
-            default:
-                Logger.debug("Received unknown Apple Event command: \(command)", category: Logger.spaces)
+                try? await Task.sleep(for: .seconds(1))
             }
+        }
+    }
+
+    /// Applies focus events to the last snapshot immediately. Window-detected
+    /// events schedule a short refresh so the new window's complete metadata appears.
+    private func handleAeroSpaceEvent(_ event: AeroSpaceEvent) {
+        switch event.name {
+        case "focus-changed":
+            publishFocus(focusedWorkspace: event.workspace, focusedWindowId: event.windowId)
+            scheduleFocusedWindowRefresh(expectedWindowId: event.windowId)
+
+        case "focused-workspace-changed":
+            publishFocus(focusedWorkspace: event.workspace, focusedWindowId: nil)
+            scheduleFocusedWindowRefresh(expectedWindowId: nil)
+
+        case "window-detected":
+            scheduleDebouncedRefresh(delay: .milliseconds(75))
+
+        default:
+            Logger.debug("Ignoring AeroSpace event: \(event.name)", category: Logger.spaces)
+        }
+    }
+
+    /// Fetches the focused window after an event and merges only its latest title.
+    ///
+    /// The event-driven focus update remains immediate. This small, cancellable
+    /// follow-up query prevents title changes from waiting for the five-second
+    /// reconciliation pass and coalesces the workspace/focus event pair.
+    private func scheduleFocusedWindowRefresh(expectedWindowId: UInt32?) {
+        focusedWindowRefreshTask?.cancel()
+        let executablePath = aeroSpaceExecutable
+
+        focusedWindowRefreshTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            try? await Task.sleep(for: .milliseconds(25))
+            guard !Task.isCancelled else { return }
+
+            guard let focusedWindow = await fetchFocusedWindow(executablePath: executablePath) else { return }
+
+            guard !Task.isCancelled else { return }
+
+            if let expectedWindowId, focusedWindow.id != Int(expectedWindowId) {
+                return
+            }
+
+            if let focusedWindowId = UInt32(exactly: focusedWindow.id) {
+                publishFocus(
+                    focusedWorkspace: focusedWindow.workspace,
+                    focusedWindowId: focusedWindowId
+                )
+            }
+
+            let currentSpaces = spacesWithWindowsSubject.value
+            let updatedSpaces = AeroSpaceFocusReducer.replacingWindowTitle(
+                in: currentSpaces,
+                windowId: focusedWindow.id,
+                title: focusedWindow.title
+            )
+
+            guard updatedSpaces != currentSpaces else { return }
+
+            spacesWithWindowsSubject.send(updatedSpaces)
+        }
+    }
+
+    /// Publishes a local focus-only update without spawning any CLI processes.
+    private func publishFocus(focusedWorkspace: String?, focusedWindowId: UInt32?) {
+        let currentSpaces = spacesWithWindowsSubject.value
+        let updatedSpaces = AeroSpaceFocusReducer.reduce(
+            spaces: currentSpaces,
+            focusedWorkspace: focusedWorkspace,
+            focusedWindowId: focusedWindowId
+        )
+
+        guard updatedSpaces != currentSpaces else { return }
+
+        spacesWithWindowsSubject.send(updatedSpaces)
+        if !aeroSpaceRunningSubject.value {
+            aeroSpaceRunningSubject.send(true)
         }
     }
 
@@ -319,10 +383,10 @@ public final class AeroSpaceRepository: SpacesGateway {
     ///
     /// NSWorkspace often fires multiple related notifications back-to-back when an
     /// app quits; a short debounce avoids redundant `updateSpacesData` calls.
-    private func scheduleDebouncedRefresh() {
+    private func scheduleDebouncedRefresh(delay: Duration = .milliseconds(150)) {
         pendingRefreshTask?.cancel()
         pendingRefreshTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(150))
+            try? await Task.sleep(for: delay)
             guard !Task.isCancelled else { return }
 
             await self?.updateSpacesData()
@@ -330,9 +394,10 @@ public final class AeroSpaceRepository: SpacesGateway {
     }
 
     deinit {
-        // Apple Events cleanup is handled automatically when the object is deallocated.
-        // NSWorkspace observers are torn down via configureWindowFocusMonitoring toggles;
-        // for a long-lived @MainActor gateway, any residual observer is released at process exit.
+        eventMonitoringTask?.cancel()
+        reconciliationTask?.cancel()
+        pendingRefreshTask?.cancel()
+        focusedWindowRefreshTask?.cancel()
     }
 
     // MARK: - SpacesGateway Implementation
@@ -340,7 +405,12 @@ public final class AeroSpaceRepository: SpacesGateway {
     /// Sets up subscription to monitor executable path changes.
     private func setupUseCaseObservers() {
         getAeroSpacePathUseCase.execute()
-            .assign(to: \.aeroSpaceExecutable, on: self)
+            .sink { [weak self] executablePath in
+                if self?.aeroSpaceExecutable != executablePath {
+                    self?.aeroSpaceExecutable = executablePath
+                    self?.configureWindowFocusMonitoring()
+                }
+            }
             .store(in: &cancellables)
 
         getOptimizedPerformanceEnabledUseCase.execute()
@@ -396,28 +466,36 @@ public final class AeroSpaceRepository: SpacesGateway {
         Logger.info("Focusing space", category: Logger.spaces, metadata: ["spaceId": spaceId])
         Logger.beginInterval("Focus Space Operation", id: Logger.SignpostID.spaceFocus)
 
-        let executablePath = aeroSpaceExecutable
-        try await Task.detached(priority: .userInitiated) {
-            do {
-                let cli = self.cliFactory.makeClient(executablePath: executablePath)
-                _ = try await cli.execute(arguments: ["workspace", spaceId])
-                Logger.endInterval("Focus Space Operation", id: Logger.SignpostID.spaceFocus)
+        let previousSpaces = spacesWithWindowsSubject.value
+        publishFocus(focusedWorkspace: spaceId, focusedWindowId: nil)
 
-                Logger.info(
-                    "Successfully focused space",
-                    category: Logger.spaces,
-                    metadata: ["spaceId": spaceId]
-                )
-            } catch {
-                Logger.error(
-                    "Failed to focus space",
-                    error: error,
-                    category: Logger.spaces,
-                    metadata: ["spaceId": spaceId]
-                )
-                throw error
-            }
-        }.value
+        let executablePath = aeroSpaceExecutable
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                do {
+                    let cli = self.cliFactory.makeClient(executablePath: executablePath)
+                    _ = try await cli.execute(arguments: ["workspace", spaceId])
+                    Logger.endInterval("Focus Space Operation", id: Logger.SignpostID.spaceFocus)
+
+                    Logger.info(
+                        "Successfully focused space",
+                        category: Logger.spaces,
+                        metadata: ["spaceId": spaceId]
+                    )
+                } catch {
+                    Logger.error(
+                        "Failed to focus space",
+                        error: error,
+                        category: Logger.spaces,
+                        metadata: ["spaceId": spaceId]
+                    )
+                    throw error
+                }
+            }.value
+        } catch {
+            spacesWithWindowsSubject.send(previousSpaces)
+            throw error
+        }
     }
 
     /// Focuses a specific window.
@@ -429,28 +507,42 @@ public final class AeroSpaceRepository: SpacesGateway {
         Logger.info("Focusing window", category: Logger.spaces, metadata: ["windowId": windowId])
         Logger.beginInterval("Focus Window Operation", id: Logger.SignpostID.windowFocus)
 
-        let executablePath = aeroSpaceExecutable
-        try await Task.detached(priority: .userInitiated) {
-            do {
-                let cli = self.cliFactory.makeClient(executablePath: executablePath)
-                _ = try await cli.execute(arguments: ["focus", "--window-id", windowId])
-                Logger.endInterval("Focus Window Operation", id: Logger.SignpostID.windowFocus)
+        let previousSpaces = spacesWithWindowsSubject.value
+        if let numericWindowId = UInt32(windowId) {
+            let focusedWorkspace = spacesWithWindowsSubject.value
+                .first { space in
+                    space.windows.contains { $0.id == Int(numericWindowId) }
+                }?.id
+            publishFocus(focusedWorkspace: focusedWorkspace, focusedWindowId: numericWindowId)
+        }
 
-                Logger.info(
-                    "Successfully focused window",
-                    category: Logger.spaces,
-                    metadata: ["windowId": windowId]
-                )
-            } catch {
-                Logger.error(
-                    "Failed to focus window",
-                    error: error,
-                    category: Logger.spaces,
-                    metadata: ["windowId": windowId]
-                )
-                throw error
-            }
-        }.value
+        let executablePath = aeroSpaceExecutable
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                do {
+                    let cli = self.cliFactory.makeClient(executablePath: executablePath)
+                    _ = try await cli.execute(arguments: ["focus", "--window-id", windowId])
+                    Logger.endInterval("Focus Window Operation", id: Logger.SignpostID.windowFocus)
+
+                    Logger.info(
+                        "Successfully focused window",
+                        category: Logger.spaces,
+                        metadata: ["windowId": windowId]
+                    )
+                } catch {
+                    Logger.error(
+                        "Failed to focus window",
+                        error: error,
+                        category: Logger.spaces,
+                        metadata: ["windowId": windowId]
+                    )
+                    throw error
+                }
+            }.value
+        } catch {
+            spacesWithWindowsSubject.send(previousSpaces)
+            throw error
+        }
     }
 
     /// Starts AeroSpace if it's not currently running.
@@ -702,11 +794,10 @@ public final class AeroSpaceRepository: SpacesGateway {
     /// Add this new method that does the heavy work off-main
     nonisolated private func reconfigureAeroSpaceOffMain(
         configPath: URL,
-        executablePath: String,
-        optimized: Bool
+        executablePath: String
     ) async {
-        let focusChanged = updateOnFocusChangedCallback(at: configPath, optimized: optimized)
-        let workspaceChanged = updateExecOnWorkspaceChangeCallback(at: configPath, optimized: optimized)
+        let focusChanged = updateOnFocusChangedCallback(at: configPath, optimized: false)
+        let workspaceChanged = updateExecOnWorkspaceChangeCallback(at: configPath, optimized: false)
 
         guard focusChanged || workspaceChanged, !executablePath.isEmpty else { return }
 
