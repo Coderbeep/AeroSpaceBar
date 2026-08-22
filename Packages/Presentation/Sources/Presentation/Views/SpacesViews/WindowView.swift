@@ -1,6 +1,7 @@
 // Copyright (c) 2025 AeroSpaceBar by Ronen Druker.
 // Modifications Copyright (c) 2026 Jakub Kubiak.
 // Modified 2026-08-22 by Jakub Kubiak: Display focused window titles without transition latency.
+// Modified 2026-08-22 by Jakub Kubiak: Keep inactive workspace icons visually secondary.
 
 import Domain
 import SwiftUI
@@ -52,9 +53,9 @@ struct WindowView: View {
     }
 
     /// Computed property for space focus state to avoid repeated calculations.
-    /// - Returns: True if any window in the space is focused
+    /// - Returns: True if the space or one of its windows is focused
     private var spaceIsFocused: Bool {
-        space.windows.contains(where: \.isFocused)
+        space.isFocused || space.windows.contains(where: \.isFocused)
     }
 
     // MARK: - Body

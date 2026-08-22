@@ -39,6 +39,8 @@ the menu bar.
 - 🎨 **Beautiful UI**: Modern SwiftUI interface with smooth animations and hover effects
 - ⚡ **Real-time Updates**: Focus changes render immediately, with an asynchronous focused-title refresh and no
   per-switch AppleScript processes
+- 🎯 **Clear Focus Hierarchy**: The active workspace stays visually prominent while inactive workspace icons remain
+  secondary
 - 🔒 **Privacy Focused**: Runs entirely locally, no data sent to external servers
 - 🔧 **Spaces & Groups**: Organize and manage workspace windows and menubar groups with custom ranges and settings
 - 🎨 **Advanced Theming**: Comprehensive theme system with presets and per-space customization

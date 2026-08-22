@@ -1,4 +1,6 @@
 // Copyright (c) 2025 AeroSpaceBar by Ronen Druker.
+// Modifications Copyright (c) 2026 Jakub Kubiak.
+// Modified 2026-08-22 by Jakub Kubiak: Clarified workspace and window focus hierarchy.
 
 import Domain
 import SwiftUI
@@ -58,6 +60,18 @@ struct SpaceFocusState: ViewModifier {
                     backgroundView(for: geometry)
                 }
             )
+            .overlay {
+                if isFocused {
+                    RoundedRectangle(cornerRadius: geometricProperties.cornerRadius, style: .continuous)
+                        .strokeBorder(
+                            colorProperties.foregroundColor.opacity(0.9),
+                            lineWidth: max(2, geometricProperties.borderWidth + 1)
+                        )
+                        .padding(.vertical, geometricProperties.borderWidth)
+                        .accessibilityHidden(true)
+                        .allowsHitTesting(false)
+                }
+            }
             .padding(.horizontal, ConfigurationDefaults.widgetSpacing + (geometricProperties.borderWidth * 2))
     }
 
@@ -125,11 +139,32 @@ struct SpaceFocusState: ViewModifier {
 
 /// Window focus state modifier
 struct WindowFocusState: ViewModifier {
+    /// Opacity for the focused window in the active workspace.
+    private static let focusedWindowOpacity = 1.0
+
+    /// Opacity for other windows in the active workspace.
+    private static let activeWorkspaceWindowOpacity = 0.7
+
+    /// Opacity for every window in an inactive workspace.
+    private static let inactiveWorkspaceWindowOpacity = 0.5
+
     let isFocused: Bool
     let spaceIsFocused: Bool
 
     func body(content: Content) -> some View {
-        content.opacity(spaceIsFocused && !isFocused ? 0.5 : 1)
+        content.opacity(Self.opacity(isFocused: isFocused, spaceIsFocused: spaceIsFocused))
+    }
+
+    /// Resolves icon opacity so inactive workspaces never look more prominent
+    /// than the selected workspace.
+    /// - Parameters:
+    ///   - isFocused: Whether this window is currently focused.
+    ///   - spaceIsFocused: Whether this window belongs to the active workspace.
+    /// - Returns: The opacity for the window icon.
+    static func opacity(isFocused: Bool, spaceIsFocused: Bool) -> Double {
+        guard spaceIsFocused else { return inactiveWorkspaceWindowOpacity }
+
+        return isFocused ? focusedWindowOpacity : activeWorkspaceWindowOpacity
     }
 }
 

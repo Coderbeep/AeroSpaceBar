@@ -1,4 +1,6 @@
 // Copyright (c) 2026 AeroSpaceBar by Ronen Druker.
+// Modifications Copyright (c) 2026 Jakub Kubiak.
+// Modified 2026-08-22 by Jakub Kubiak: Covered workspace focus opacity hierarchy.
 
 import Domain
 import Nimble
@@ -228,6 +230,18 @@ final class ViewModifiersTests: XCTestCase {
 
         // Then - Should not crash and return a view
         _ = modifiedView // Just ensure it was created successfully
+    }
+
+    func testWindowFocusOpacityHierarchy() {
+        let focusedWindowOpacity = WindowFocusState.opacity(isFocused: true, spaceIsFocused: true)
+        let activeWorkspaceWindowOpacity = WindowFocusState.opacity(isFocused: false, spaceIsFocused: true)
+        let inactiveWorkspaceWindowOpacity = WindowFocusState.opacity(isFocused: false, spaceIsFocused: false)
+
+        expect(focusedWindowOpacity) == 1.0
+        expect(activeWorkspaceWindowOpacity) == 0.7
+        expect(inactiveWorkspaceWindowOpacity) == 0.5
+        expect(focusedWindowOpacity).to(beGreaterThan(activeWorkspaceWindowOpacity))
+        expect(activeWorkspaceWindowOpacity).to(beGreaterThan(inactiveWorkspaceWindowOpacity))
     }
 
     // MARK: - Visual Container Modifier Tests
